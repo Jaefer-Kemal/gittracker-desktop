@@ -166,6 +166,7 @@ export function registerGitHandlers(): void {
       const session = await checkAndRefreshSession()
       const db = getDb()
       const repo = db.prepare('SELECT * FROM repositories WHERE repoId = ?').get(repoId)
+
       if (!repo) {
         logger.warn(`[git:syncRepoStatus] Repo not found in local DB: ${repoId}`)
         return {
@@ -174,16 +175,31 @@ export function registerGitHandlers(): void {
           message: 'Repository not found locally.'
         }
       }
-      // Check health for this repo only
-      const [health] = await GitServices.checkAllLocalRepoStatuses(session.userId, {
+
+      // Get all statuses and find the one for this specific repo
+      const allStatuses = await GitServices.checkAllLocalRepoStatuses(session.userId, {
         validateFingerprint: true
       })
+
+      const health = allStatuses.find((r) => r.repoId === repoId)
+
+      if (!health) {
+        logger.warn(`[git:syncRepoStatus] No health status found for repoId: ${repoId}`)
+        return {
+          success: false,
+          status: 'not_checked',
+          message: 'Repository health status could not be determined.'
+        }
+      }
+
       let remoteStatus = health.status
       let localStatus = health.status
+      let remoteResult: { ok: boolean; error?: string } | null = null
+
       if (health.status === 'fingerprint_mismatch') {
         remoteStatus = 'moved'
       }
-      let remoteResult: { ok: boolean; error?: string } | null = null
+
       if (['missing', 'moved', 'deleted'].includes(remoteStatus)) {
         try {
           const updateDto = { status: remoteStatus, developerId: session.userId }
@@ -197,7 +213,8 @@ export function registerGitHandlers(): void {
           )
           logger.info(`[git:syncRepoStatus] PATCH response: ${JSON.stringify(response.data)}`)
           remoteResult = { ok: true }
-          // If fingerprint_mismatch, update local DB to moved
+
+          // Update local DB accordingly
           if (health.status === 'fingerprint_mismatch') {
             await GitServices.updateLocalRepoStatus(repo.id, 'moved')
             localStatus = 'moved'
@@ -207,10 +224,12 @@ export function registerGitHandlers(): void {
         } catch (remoteErr) {
           const remoteMsg = remoteErr instanceof Error ? remoteErr.message : 'Unknown remote error'
           remoteResult = { ok: false, error: remoteMsg }
+
           logger.error(
             `[git:syncRepoStatus] Failed to patch remote for repo ${repoId}: ${remoteMsg}`
           )
-          // Still update local DB to moved if fingerprint_mismatch
+
+          // Still update local DB
           if (health.status === 'fingerprint_mismatch') {
             await GitServices.updateLocalRepoStatus(repo.id, 'moved')
             localStatus = 'moved'
@@ -219,9 +238,10 @@ export function registerGitHandlers(): void {
           }
         }
       } else {
-        // Not unhealthy, just update local DB
+        // Healthy, just update local status
         await GitServices.updateLocalRepoStatus(repo.id, health.status)
       }
+
       return {
         success: true,
         repoId,
@@ -235,6 +255,7 @@ export function registerGitHandlers(): void {
       return { success: false, error: errorMsg }
     }
   })
+
   // IPC: Get a single repository from local DB by repoId
   ipcMain.handle('git:getRepository', async (_, repoId: string) => {
     try {

@@ -200,7 +200,7 @@ function RepoHealthPage(): JSX.Element {
               )}
               <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                 {!isOffline && repo.status === 'deleted' && (
-                  <button onClick={() => handleFixPath(repo)} className={styles.secondaryAction}>
+                  <button onClick={() => handleSetupMissing(repo)} className={styles.secondaryAction}>
                     Update Path
                   </button>
                 )}

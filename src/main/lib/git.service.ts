@@ -329,22 +329,37 @@ class GitServices {
           processedCommitHashes.add(commit.hash)
 
           // --- Step 4 & 5: Process Each UNIQUE Commit for Detailed Stats ---
-          const diffTreeOutput = await git.raw(['diff-tree', '-r', '--name-status', commit.hash])
-          const fileStatuses = diffTreeOutput
-            ? diffTreeOutput
-                .split('\n')
-                .filter(Boolean)
-                .map((line) => ({
-                  status: line.split('\t')[0],
-                  file: line.split('\t')[1]
-                }))
-            : []
-          const files_added = fileStatuses.filter((f) => f.status === 'A').length
-          const files_removed = fileStatuses.filter((f) => f.status === 'D').length
-
-          const showOutput = await git.show(['--stat=200', commit.hash])
-          const parsedChanges = this.parseShowStat(showOutput)
           const parentHashes = commit.parents ? commit.parents.split(' ') : []
+          let files_added = 0
+          let files_removed = 0
+          let files_changed = 0
+
+          const numstatOutput = await git.show(['--numstat', '--no-color', commit.hash])
+          const parsedChanges = this.parseNumStat(numstatOutput)
+
+          if (parentHashes.length === 0) {
+            // First commit: all files are new
+            logger.info(`[CommitSaver] First commit detected: ${commit.hash}`)
+            files_added = parsedChanges.changes.length
+            files_changed = files_added
+            files_removed = 0
+          } else {
+            // For normal commits, use diff-tree to detect A/D files
+            const diffTreeOutput = await git.raw(['diff-tree', '-r', '--name-status', commit.hash])
+            const fileStatuses = diffTreeOutput
+              ? diffTreeOutput
+                  .split('\n')
+                  .filter(Boolean)
+                  .map((line) => ({
+                    status: line.split('\t')[0],
+                    file: line.split('\t')[1]
+                  }))
+              : []
+
+            files_added = fileStatuses.filter((f) => f.status === 'A').length
+            files_removed = fileStatuses.filter((f) => f.status === 'D').length
+            files_changed = fileStatuses.length
+          }
 
           allNewCommits.push({
             repoId: repo.repoId,
@@ -356,7 +371,7 @@ class GitServices {
             timestamp: new Date(commit.date).toISOString(),
             parentCommit: parentHashes.length > 0 ? parentHashes[0] : null,
             stats: {
-              files_changed: fileStatuses.length,
+              files_changed,
               files_added,
               files_removed,
               lines_added: parsedChanges.totalInsertions,
@@ -419,12 +434,10 @@ class GitServices {
   }
 
   /**
-   * A private helper method to parse the output of 'git show --stat' into structured data.
-   * This includes a detailed list of file changes and the total line changes.
-   * @param showOutput The raw string output from the git command.
-   * @returns An object containing the parsed statistics.
+   * Parses the output of `git show --numstat` into structured stats.
+   * Each line: <added>\t<removed>\t<file>
    */
-  private parseShowStat(showOutput: string): {
+  private parseNumStat(output: string): {
     changes: { fileName: string; added: number; removed: number }[]
     totalInsertions: number
     totalDeletions: number
@@ -433,28 +446,24 @@ class GitServices {
     let totalInsertions = 0
     let totalDeletions = 0
 
-    const lines = showOutput.split('\n')
-    // Find the summary line like " 1 file changed, 1 insertion(+), 1 deletion(-) "
-    const summaryLine = lines.find((line) => line.includes('file changed'))
+    const lines = output.trim().split('\n')
 
-    if (summaryLine) {
-      const insertionMatch = summaryLine.match(/(\d+)\s+insertion/)
-      const deletionMatch = summaryLine.match(/(\d+)\s+deletion/)
-      totalInsertions = insertionMatch ? parseInt(insertionMatch[1], 10) : 0
-      totalDeletions = deletionMatch ? parseInt(deletionMatch[1], 10) : 0
-    }
-
-    // Process each file's line in the stat output
     for (const line of lines) {
-      // Match lines like: " src/services/git.service.ts | 2 +- "
-      const match = line.match(/^\s*(.+?)\s*\|\s*\d+\s*([+-]+)$/)
-      if (match) {
-        const fileName = match[1].trim()
-        const diffChars = match[2]
-        const added = (diffChars.match(/\+/g) || []).length
-        const removed = (diffChars.match(/-/g) || []).length
-        changes.push({ fileName, added, removed })
+      const [addedStr, removedStr, fileName] = line.split('\t')
+
+      // Skip binary files (represented as "-\t-\tfile")
+      if (!addedStr || !removedStr || !fileName || addedStr === '-' || removedStr === '-') {
+        continue
       }
+
+      const added = parseInt(addedStr, 10)
+      const removed = parseInt(removedStr, 10)
+
+      if (isNaN(added) || isNaN(removed)) continue
+
+      changes.push({ fileName, added, removed })
+      totalInsertions += added
+      totalDeletions += removed
     }
 
     return { changes, totalInsertions, totalDeletions }
